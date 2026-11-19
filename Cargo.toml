@@ -1,0 +1,59 @@
+[package]
+name = "aigakira-telemetry-scs-udp"
+version = "0.4.4"
+edition = "2024"
+# scs-sdk-plugin 0.1.1 declares rust-version 1.85 (edition 2024).
+rust-version = "1.85"
+description = "SCS Telemetry SDK plugin (ETS2/ATS) that streams truck telemetry as compact JSON over UDP"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# Output file: target/x86_64-pc-windows-gnu/release/aigakira_telemetry_ets2_udp.dll
+name = "aigakira_telemetry_ets2_udp"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[workspace]
+# harness/ is a test host that loads the plugin like the game does (see
+# README "Testing the overlay"). default-members keeps plain `cargo build/test`
+# to the plugin itself.
+members = [".", "harness"]
+default-members = ["."]
+
+[dependencies]
+fontdue = "0.9.5"
+# Typed, safe SCS SDK framework (AptS-1547/scs-sdk-crates). It owns the
+# scs_telemetry_init / scs_telemetry_shutdown exports, all raw FFI, and wraps
+# every foreign entry point in catch_unwind. Pinned exactly: pre-1.0 and its
+# own internal crates are pinned with "=" as well.
+scs-sdk-plugin = "=0.1.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# no_std build with pure-Rust math (libm crate): with "std" tiny-skia calls the
+# system acosf, which newest glibc versions export only as GLIBC_2.43 — the
+# Linux .so would then refuse to load on older distributions.
+tiny-skia = { version = "0.12.0", default-features = false, features = ["simd", "no-std-float"] }
+toml_edit = "0.25.19"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# MUST stay "unwind". The framework contains panics with catch_unwind before
+# they reach the game; with panic = "abort" any panic would kill ETS2 instead.
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"
+
+[dev-dependencies]
+tiny-skia = { version = "0.12.0", features = ["png-format"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gl = "0.14.0"
+libc = "0.2.191"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
