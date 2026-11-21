@@ -37,6 +37,11 @@
 //! | warn_battery          | truck.battery.voltage.warning        | bool |                             |
 //! | warn_adblue           | truck.adblue.warning (ETS2-only 1.12+) | bool |                           |
 //! | nav_speed_limit_ms    | truck.navigation.speed.limit (ETS2 1.12+) | f32 | m/s, 0 = no limit known |
+//! | navigation_distance_m | truck.navigation.distance (ETS2 1.12+, ATS 1.00+) | f32 | meters to navigation target |
+//! | navigation_time_s    | truck.navigation.time (ETS2 1.12+, ATS 1.00+) | f32 | advisor ETA in simulated seconds |
+//! | local_scale          | common.local.scale (when provided) | f32 | simulated seconds per real second; defaults to 1 |
+//! | rest_stop_min        | common.rest.stop (ETS2 1.09+, ATS 1.00+) | i32 | in-game minutes until next rest stop |
+//! | game_time_min        | common.game.time (ETS2 1.09+, ATS 1.00+) | u32 | in-game minutes since first day |
 //!
 //! Truck configuration attributes (configuration id `truck`):
 //! `fuel.capacity` f32, `retarder.steps` u32, `gears.forward` u32,
@@ -61,6 +66,10 @@ pub struct Caps {
     pub air_emergency: bool,
     pub diff_lock: bool,
     pub navigation: bool,
+    pub navigation_distance: bool,
+    pub navigation_time: bool,
+    pub rest_stop: bool,
+    pub game_time: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,6 +145,11 @@ pub struct Snapshot {
 
     // navigation
     pub nav_speed_limit_ms: f32,
+    pub navigation_distance_m: f32,
+    pub navigation_time_s: f32,
+    pub local_scale: f32,
+    pub rest_stop_min: i32,
+    pub game_time_min: u32,
 }
 
 impl Default for Snapshot {
@@ -199,6 +213,11 @@ impl Snapshot {
             warn_battery: false,
             warn_adblue: false,
             nav_speed_limit_ms: 0.0,
+            navigation_distance_m: 0.0,
+            navigation_time_s: 0.0,
+            local_scale: 1.0,
+            rest_stop_min: 0,
+            game_time_min: 0,
         }
     }
 
@@ -320,6 +339,7 @@ struct Wire<'a> {
     game_ver: &'a str,
     paused: bool,
     truck: bool,
+    game_time_min: Option<u32>,
     drive: Drive,
     input: Controls,
     effective: Controls,
@@ -329,6 +349,7 @@ struct Wire<'a> {
     lights: Lights,
     warn: Warnings,
     nav: Nav,
+    rest_stop_min: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -411,6 +432,9 @@ struct Warnings {
 
 #[derive(Serialize)]
 struct Nav {
+    distance_km: Option<f32>,
+    eta_real_s: Option<f64>,
+    eta_at_ms: Option<u64>,
     limit_kmh: Option<f32>,
 }
 
@@ -446,6 +470,19 @@ fn opt<T>(available: bool, value: T) -> Option<T> {
     available.then_some(value)
 }
 
+fn real_eta_seconds(snapshot: &Snapshot) -> Option<f64> {
+    if !snapshot.caps.navigation_time || !snapshot.navigation_time_s.is_finite() || snapshot.navigation_time_s <= 0.0 {
+        return None;
+    }
+    let scale = if snapshot.local_scale.is_finite() && snapshot.local_scale > 0.0 {
+        f64::from(snapshot.local_scale)
+    } else {
+        1.0
+    };
+    let seconds = f64::from(snapshot.navigation_time_s) / scale;
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
 pub fn encode(snapshot: &Snapshot, meta: &SessionMeta, env: Envelope) -> Vec<u8> {
     let s = snapshot.effective();
     let c = s.caps;
@@ -460,6 +497,16 @@ pub fn encode(snapshot: &Snapshot, meta: &SessionMeta, env: Envelope) -> Vec<u8>
         0.0
     };
     let cruise_on = s.cruise_on();
+    let eta_real_s = real_eta_seconds(&s);
+    let eta_at_ms = if s.paused {
+        None
+    } else {
+        eta_real_s.and_then(|seconds| {
+            let eta_ms = (seconds * 1000.0).round();
+            (eta_ms.is_finite() && eta_ms >= 0.0 && eta_ms < u64::MAX as f64)
+                .then(|| env.ts_ms.saturating_add(eta_ms as u64))
+        })
+    };
 
     let wire = Wire {
         schema: SCHEMA,
@@ -472,6 +519,7 @@ pub fn encode(snapshot: &Snapshot, meta: &SessionMeta, env: Envelope) -> Vec<u8>
         game_ver: &meta.game_ver,
         paused: s.paused,
         truck: s.truck_present,
+        game_time_min: opt(c.game_time, s.game_time_min),
         drive: Drive {
             speed_ms: num(s.speed_ms, 2),
             speed_kmh: kmh(s.speed_ms),
@@ -542,8 +590,12 @@ pub fn encode(snapshot: &Snapshot, meta: &SessionMeta, env: Envelope) -> Vec<u8>
             adblue: opt(c.adblue, s.warn_adblue),
         },
         nav: Nav {
+            distance_km: opt(c.navigation_distance, num(s.navigation_distance_m / 1000.0, 1)),
+            eta_real_s,
+            eta_at_ms,
             limit_kmh: opt(c.navigation, kmh(s.nav_speed_limit_ms)),
         },
+        rest_stop_min: opt(c.rest_stop, s.rest_stop_min),
     };
 
     // Serialising plain structs of numbers/bools/short strings cannot fail;
@@ -571,6 +623,10 @@ mod tests {
         air_emergency: true,
         diff_lock: true,
         navigation: true,
+        navigation_distance: true,
+        navigation_time: true,
+        rest_stop: true,
+        game_time: true,
     };
 
     fn meta() -> SessionMeta {
@@ -620,6 +676,8 @@ mod tests {
         s.fuel_range_km = f;
         s.cruise_ms = 987_654.3;
         s.nav_speed_limit_ms = f;
+        s.navigation_distance_m = 12_345.0;
+        s.game_time_min = 1_470;
         s.retarder_level = u32::MAX;
         s.retarder_steps = u32::MAX;
         s.forward_gears = u32::MAX;
@@ -682,6 +740,11 @@ mod tests {
         assert!(v["ind"]["hazard"].is_null());
         assert!(v["drive"]["dgear"].is_null());
         assert!(v["nav"]["limit_kmh"].is_null());
+        assert!(v["nav"]["distance_km"].is_null());
+        assert!(v["nav"]["eta_real_s"].is_null());
+        assert!(v["nav"]["eta_at_ms"].is_null());
+        assert!(v["rest_stop_min"].is_null());
+        assert!(v["game_time_min"].is_null());
         assert_eq!(v["drive"]["gear_label"], "R1");
     }
 
@@ -695,6 +758,9 @@ mod tests {
         s.hazard = true;
         s.retarder_level = 2;
         s.retarder_steps = 4;
+        s.rest_stop_min = 275;
+        s.navigation_distance_m = 12_345.0;
+        s.game_time_min = 1_470;
         s.fuel_l = 300.0;
         s.fuel_capacity_l = 600.0;
         let v = parse(&encode(&s, &meta(), env()));
@@ -703,7 +769,28 @@ mod tests {
         assert_eq!(v["ind"]["lblinker"], true);
         assert_eq!(v["ind"]["hazard"], true);
         assert_eq!(v["ind"]["retarder"], 2);
+        assert_eq!(v["rest_stop_min"], 275);
+        assert_eq!(v["game_time_min"], 1_470);
+        assert_eq!(v["nav"]["distance_km"], 12.3);
         assert_eq!(v["fuel"]["pct"], 50.0);
+    }
+
+    #[test]
+    fn navigation_eta_converts_to_real_seconds_and_arrival_timestamp() {
+        let mut s = Snapshot::new(ALL_CAPS);
+        s.truck_present = true;
+        s.paused = false;
+        s.navigation_time_s = 7_200.0;
+        s.local_scale = 2.0;
+        let e = Envelope { ts_ms: 1_000_000, ..env() };
+        let v = parse(&encode(&s, &meta(), e));
+        assert_eq!(v["nav"]["eta_real_s"], 3_600.0);
+        assert_eq!(v["nav"]["eta_at_ms"], 4_600_000_u64);
+
+        s.paused = true;
+        let v = parse(&encode(&s, &meta(), e));
+        assert_eq!(v["nav"]["eta_real_s"], 3_600.0);
+        assert!(v["nav"]["eta_at_ms"].is_null());
     }
 
     #[test]

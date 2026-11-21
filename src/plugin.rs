@@ -8,7 +8,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use scs_sdk_plugin::sdk::channels::truck as t;
+use scs_sdk_plugin::sdk::channels::{common as c, truck as t};
 use scs_sdk_plugin::sdk::configuration::{attributes as attr, ids};
 use scs_sdk_plugin::sdk::{TelemetryApiVersion, game};
 use scs_sdk_plugin::{
@@ -88,6 +88,10 @@ impl TelemetryPlugin for AigakiraPlugin {
             air_emergency: info.supports(t::BRAKE_AIR_PRESSURE_EMERGENCY.availability()),
             diff_lock: info.supports(t::DIFFERENTIAL_LOCK.availability()),
             navigation: info.supports(t::NAVIGATION_SPEED_LIMIT.availability()),
+            navigation_distance: info.supports(t::NAVIGATION_DISTANCE.availability()),
+            navigation_time: info.supports(t::NAVIGATION_TIME.availability()),
+            rest_stop: info.supports(c::NEXT_REST_STOP.availability()),
+            game_time: info.supports(c::GAME_TIME.availability()),
         };
         let meta = SessionMeta {
             sid: session_id(),
@@ -155,6 +159,11 @@ impl TelemetryPlugin for AigakiraPlugin {
         ctx.subscribe_optional(t::BRAKE_AIR_PRESSURE_EMERGENCY)?; // ETS2 1.01
         ctx.subscribe_optional(t::DIFFERENTIAL_LOCK)?; // ETS2 1.17
         ctx.subscribe_optional(t::NAVIGATION_SPEED_LIMIT)?; // ETS2 1.12
+        ctx.subscribe_optional(t::NAVIGATION_DISTANCE)?; // ETS2 1.12; ATS 1.00
+        ctx.subscribe_optional(t::NAVIGATION_TIME)?; // ETS2 1.12; ATS 1.00
+        ctx.subscribe_optional(c::LOCAL_SCALE)?; // defaults to 1 on 1:1 maps that omit it
+        ctx.subscribe_optional(c::NEXT_REST_STOP)?; // ETS2 1.09; ATS 1.00
+        ctx.subscribe_optional(c::GAME_TIME)?; // ETS2 1.09; ATS 1.00
 
         // Settings file next to the plugin; created with defaults on the
         // first start (overlay off).
@@ -280,6 +289,11 @@ impl TelemetryPlugin for AigakiraPlugin {
             t::BATTERY_VOLTAGE_WARNING => warn_battery,
             t::ADBLUE_WARNING => warn_adblue,
             t::NAVIGATION_SPEED_LIMIT => nav_speed_limit_ms,
+            t::NAVIGATION_DISTANCE => navigation_distance_m,
+            t::NAVIGATION_TIME => navigation_time_s,
+            c::LOCAL_SCALE => local_scale,
+            c::NEXT_REST_STOP => rest_stop_min,
+            c::GAME_TIME => game_time_min,
         }
     }
 

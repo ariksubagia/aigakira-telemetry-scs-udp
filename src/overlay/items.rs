@@ -45,6 +45,67 @@ fn s<'a>(p: &'a Value, path: &str) -> Option<&'a str> {
 
 const NA: &str = "n/a";
 
+pub const TIME_ZONES: &[&str] = &[
+    "UTC",
+    "America/Anchorage",
+    "America/Los_Angeles",
+    "America/Vancouver",
+    "America/Phoenix",
+    "America/Denver",
+    "America/Chicago",
+    "America/Toronto",
+    "America/New_York",
+    "America/Halifax",
+    "America/St_Johns",
+    "America/Mexico_City",
+    "America/Bogota",
+    "America/Lima",
+    "America/Buenos_Aires",
+    "America/Sao_Paulo",
+    "Pacific/Honolulu",
+    "Europe/Dublin",
+    "Europe/London",
+    "Europe/Paris",
+    "Europe/Berlin",
+    "Europe/Rome",
+    "Europe/Madrid",
+    "Europe/Athens",
+    "Europe/Helsinki",
+    "Europe/Moscow",
+    "Africa/Cairo",
+    "Africa/Johannesburg",
+    "Africa/Nairobi",
+    "Asia/Dubai",
+    "Asia/Karachi",
+    "Asia/Kolkata",
+    "Asia/Dhaka",
+    "Asia/Jakarta",
+    "Asia/Bangkok",
+    "Asia/Singapore",
+    "Asia/Shanghai",
+    "Asia/Hong_Kong",
+    "Asia/Manila",
+    "Asia/Tokyo",
+    "Asia/Seoul",
+    "Australia/Perth",
+    "Australia/Adelaide",
+    "Australia/Brisbane",
+    "Australia/Sydney",
+    "Australia/Melbourne",
+    "Pacific/Auckland",
+    "Pacific/Fiji",
+];
+
+pub fn valid_timezone(timezone: &str) -> bool {
+    TIME_ZONES.contains(&timezone)
+}
+
+pub fn next_timezone(timezone: &str, direction: i32) -> &'static str {
+    let current = TIME_ZONES.iter().position(|zone| *zone == timezone).unwrap_or(0);
+    let next = (current as i32 + direction).rem_euclid(TIME_ZONES.len() as i32) as usize;
+    TIME_ZONES[next]
+}
+
 fn text(t: impl Into<String>, tone: Tone) -> Show {
     Show::Text(t.into(), tone)
 }
@@ -86,6 +147,16 @@ fn speed(p: &Value) -> Show {
     let shown = kmh.abs().round();
     let over = f(p, "nav.limit_kmh").filter(|l| *l > 0.0).is_some_and(|l| shown > l.round());
     text(format!("{shown:.0} km/h"), if over { Tone::Alert } else { Tone::Normal })
+}
+
+pub fn is_over_speed_limit(p: &Value) -> bool {
+    if b(p, "truck") != Some(true) || b(p, "paused") != Some(false) {
+        return false;
+    }
+    match (f(p, "drive.speed_kmh"), f(p, "nav.limit_kmh")) {
+        (Some(speed), Some(limit)) => limit > 0.0 && speed.abs() > limit,
+        _ => false,
+    }
 }
 
 fn limit(p: &Value) -> Show {
@@ -136,6 +207,64 @@ fn consumption(p: &Value) -> Show {
     match f(p, "fuel.avg_l100km") {
         Some(c) => text(format!("{c:.1} l/100km"), Tone::Normal),
         None => na(),
+    }
+}
+
+fn rest_stop(p: &Value) -> Show {
+    let Some(minutes) = get(p, "rest_stop_min").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()) else {
+        return na();
+    };
+    if minutes >= 60 {
+        text(format!("{}h {:02}m", minutes / 60, minutes % 60), Tone::Normal)
+    } else {
+        text(format!("{minutes} min"), Tone::Normal)
+    }
+}
+
+fn real_time(p: &Value) -> Show {
+    real_time_in_timezone(p, "UTC")
+}
+
+pub fn real_time_in_timezone(p: &Value, timezone: &str) -> Show {
+    let Some(ts) = get(p, "ts").and_then(Value::as_i64) else { return na() };
+    let Some(time) = chrono::DateTime::from_timestamp_millis(ts) else { return na() };
+    let Ok(zone) = timezone.parse::<chrono_tz::Tz>() else { return na() };
+    text(time.with_timezone(&zone).format("%H:%M:%S %Z").to_string(), Tone::Normal)
+}
+
+fn game_time(p: &Value) -> Show {
+    let Some(minutes) = get(p, "game_time_min").and_then(Value::as_u64) else { return na() };
+    let day = minutes / 1_440 + 1;
+    let time_of_day = minutes % 1_440;
+    text(format!("Day {day} {:02}:{:02}", time_of_day / 60, time_of_day % 60), Tone::Normal)
+}
+
+fn distance_left(p: &Value) -> Show {
+    match f(p, "nav.distance_km") {
+        Some(km) => text(format!("{km:.1} km"), Tone::Normal),
+        None => na(),
+    }
+}
+
+fn real_life_eta(p: &Value) -> Show {
+    let Some(seconds) = f(p, "nav.eta_real_s") else { return na() };
+    let total_minutes = (seconds / 60.0).ceil() as u64;
+    let label = if total_minutes >= 60 {
+        format!("{}h {:02}m", total_minutes / 60, total_minutes % 60)
+    } else if total_minutes > 0 {
+        format!("{total_minutes} min")
+    } else {
+        "<1 min".to_owned()
+    };
+    if b(p, "paused") == Some(true) {
+        text(format!("paused · {label}"), Tone::Warn)
+    } else {
+        let arrival = get(p, "nav.eta_at_ms")
+            .and_then(Value::as_u64)
+            .and_then(|millis| i64::try_from(millis).ok())
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|time| time.format("%H:%M UTC").to_string());
+        text(arrival.map_or(label.clone(), |at| format!("{label} · {at}")), Tone::Good)
     }
 }
 
@@ -281,6 +410,11 @@ pub const ITEMS: &[Item] = &[
     item!("fuel", "Fuel", true, fuel),
     item!("range", "Fuel range", false, range),
     item!("consumption", "Consumption", false, consumption),
+    item!("rest_stop", "Rest stop", true, rest_stop),
+    item!("real_time", "Real time", true, real_time),
+    item!("game_time", "Game time", true, game_time),
+    item!("job_distance", "Distance left", true, distance_left),
+    item!("real_life_eta", "Real Life ETA", true, real_life_eta),
     item!("fuel_cap", "Fuel tank", false, |p| match f(p, "fuel.cap_l") {
         Some(c) => text(format!("{c:.0} l"), Tone::Normal),
         None => na(),
@@ -341,7 +475,8 @@ pub(crate) mod tests {
          "lights":{"parking":true,"low":true,"high":false,"beacon":false,"brake":true,"reverse":false,
                    "aux_front":0,"aux_roof":2},
          "warn":{"air":false,"air_emerg":false,"oil":true,"water":false,"battery":false,"adblue":null},
-         "nav":{"limit_kmh":80.0}})
+         "nav":{"limit_kmh":80.0,"distance_km":42.7,"eta_real_s":3600.0,"eta_at_ms":1763581200123u64},
+         "rest_stop_min":275,"game_time_min":1470})
     }
 
     #[test]
@@ -418,6 +553,19 @@ pub(crate) mod tests {
         assert_eq!(show("cruise"), Show::Text("80 km/h".into(), Tone::Good));
         assert_eq!(show("warnings"), Show::Text("oil".into(), Tone::Alert));
         assert_eq!(show("blinkers"), Show::Blinkers { left: false, right: true });
+        assert_eq!(show("rest_stop"), Show::Text("4h 35m".into(), Tone::Normal));
+        assert_eq!(show("game_time"), Show::Text("Day 2 00:30".into(), Tone::Normal));
+        assert_eq!(show("job_distance"), Show::Text("42.7 km".into(), Tone::Normal));
+        assert_eq!(show("real_life_eta"), Show::Text("1h 00m · 19:40 UTC".into(), Tone::Good));
+        let mut paused = p.clone();
+        paused["paused"] = json!(true);
+        assert_eq!(
+            (ITEMS[index_of("real_life_eta").unwrap()].show)(&paused),
+            Show::Text("paused · 1h 00m".into(), Tone::Warn)
+        );
+        let mut p = p.clone();
+        p["ts"] = json!(0);
+        assert_eq!((ITEMS[index_of("real_time").unwrap()].show)(&p), Show::Text("00:00:00 UTC".into(), Tone::Normal));
         assert_eq!(show("diff_lock"), Show::Text("n/a".into(), Tone::Dim));
         assert_eq!(show("aux"), Show::Text("front off · roof full".into(), Tone::Normal));
         match show("fuel") {
@@ -427,5 +575,25 @@ pub(crate) mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn real_time_uses_named_timezone_and_daylight_saving_rules() {
+        let winter = json!({"ts": 0});
+        assert_eq!(
+            real_time_in_timezone(&winter, "America/New_York"),
+            Show::Text("19:00:00 EST".into(), Tone::Normal)
+        );
+        assert_eq!(
+            real_time_in_timezone(&winter, "Asia/Kolkata"),
+            Show::Text("05:30:00 IST".into(), Tone::Normal)
+        );
+
+        let summer_ts = chrono::DateTime::parse_from_rfc3339("2024-07-01T12:00:00Z").unwrap().timestamp_millis();
+        let summer = json!({"ts": summer_ts});
+        assert_eq!(
+            real_time_in_timezone(&summer, "America/New_York"),
+            Show::Text("08:00:00 EDT".into(), Tone::Normal)
+        );
     }
 }

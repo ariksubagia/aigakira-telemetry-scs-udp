@@ -25,7 +25,7 @@ pub const FILE_NAME: &str = "aigakira_telemetry.toml";
 /// Vertical distance between stacked boxes at scale 1 (1080p pixels).
 pub const STACK_STEP: i32 = 40;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BoxPos {
     pub id: String,
     /// Top-left corner in screen (back buffer) pixels.
@@ -34,6 +34,9 @@ pub struct BoxPos {
     /// Unchecked in edit mode: not drawn, but its position is kept so it
     /// comes back in the same place when checked again.
     pub hidden: bool,
+    pub scale: f32,
+    pub opacity: f32,
+    pub timezone: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +50,7 @@ pub struct OverlaySettings {
     /// Box background opacity outside edit mode, 0.15..=1.
     pub opacity: f32,
     pub hide_when_idle: bool,
+    pub exceed_speed_limit_indicator: bool,
     /// Shown boxes, in catalogue order.
     pub boxes: Vec<BoxPos>,
     /// Where the edit-mode control panel was last left (None = centred).
@@ -58,7 +62,15 @@ pub fn stacked(ids: &[String], x: i32, y: i32, scale: f32) -> Vec<BoxPos> {
     let step = (STACK_STEP as f32 * scale).round() as i32;
     ids.iter()
         .enumerate()
-        .map(|(i, id)| BoxPos { id: id.clone(), x, y: y + step * i as i32, hidden: false })
+        .map(|(i, id)| BoxPos {
+            id: id.clone(),
+            x,
+            y: y + step * i as i32,
+            hidden: false,
+            scale,
+            opacity: 0.8,
+            timezone: "UTC".into(),
+        })
         .collect()
 }
 
@@ -70,6 +82,7 @@ impl Default for OverlaySettings {
             scale: 1.0,
             opacity: 0.8,
             hide_when_idle: true,
+            exceed_speed_limit_indicator: false,
             boxes: stacked(&items::default_ids(), 40, 40, 1.0),
             editor: None,
         }
@@ -89,6 +102,11 @@ impl OverlaySettings {
         for b in &mut self.boxes {
             b.x = b.x.max(0);
             b.y = b.y.max(0);
+            b.scale = if b.scale.is_finite() { b.scale.clamp(0.5, 3.0) } else { self.scale };
+            b.opacity = if b.opacity.is_finite() { b.opacity.clamp(0.15, 1.0) } else { self.opacity };
+            if !items::valid_timezone(&b.timezone) {
+                b.timezone = "UTC".into();
+            }
         }
         self.boxes.sort_by_key(|b| items::index_of(&b.id).unwrap_or(usize::MAX));
         if let Some((x, y)) = &mut self.editor {
@@ -113,13 +131,59 @@ impl OverlaySettings {
         }
     }
 
+    pub fn ensure_box(&mut self, id: &str, at: (i32, i32)) {
+        if self.boxes.iter().any(|b| b.id == id) {
+            return;
+        }
+        self.boxes.push(BoxPos {
+            id: id.to_owned(),
+            x: at.0.max(0),
+            y: at.1.max(0),
+            hidden: true,
+            scale: self.scale,
+            opacity: self.opacity,
+            timezone: "UTC".into(),
+        });
+        self.sanitize();
+    }
+
+    pub fn set_box_scale(&mut self, id: &str, scale: f32) {
+        if let Some(b) = self.boxes.iter_mut().find(|b| b.id == id) {
+            b.scale = scale;
+            self.sanitize();
+        }
+    }
+
+    pub fn set_box_opacity(&mut self, id: &str, opacity: f32) {
+        if let Some(b) = self.boxes.iter_mut().find(|b| b.id == id) {
+            b.opacity = opacity;
+            self.sanitize();
+        }
+    }
+
+    pub fn set_box_timezone(&mut self, id: &str, timezone: &str) {
+        if items::valid_timezone(timezone) {
+            if let Some(b) = self.boxes.iter_mut().find(|b| b.id == id) {
+                b.timezone = timezone.to_owned();
+            }
+        }
+    }
+
     /// Hides a shown item, or shows it again: where it was before, or at
     /// `at` the first time.
     pub fn toggle(&mut self, id: &str, at: (i32, i32)) {
         match self.boxes.iter_mut().find(|b| b.id == id) {
             Some(b) => b.hidden = !b.hidden,
             None => {
-                self.boxes.push(BoxPos { id: id.to_owned(), x: at.0, y: at.1, hidden: false });
+                self.boxes.push(BoxPos {
+                    id: id.to_owned(),
+                    x: at.0,
+                    y: at.1,
+                    hidden: false,
+                    scale: self.scale,
+                    opacity: self.opacity,
+                    timezone: "UTC".into(),
+                });
                 self.sanitize();
             }
         }
@@ -162,10 +226,10 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 const BOXES_COMMENT: &str = "\
-# One box per telemetry item: `id = { x = …, y = … }` (top-left corner in
-# screen pixels). `hidden = true` hides a box but keeps its place (that is what
-# unchecking it in edit mode does); delete a line to forget it, add one to show
-# an item. Easier: use edit mode in game. Available items:
+# One box per telemetry item: `id = { x = …, y = …, scale = …, opacity = …, timezone = … }`.
+# In edit mode, select a card to adjust only that box. `hidden = true` hides it
+# but keeps its position and style. The Real time card's timezone can be cycled
+# through common IANA zones in edit mode. Easier: use edit mode in game. Items:
 ";
 
 fn boxes_comment() -> String {
@@ -183,6 +247,9 @@ fn boxes_table(boxes: &[BoxPos]) -> Table {
         let mut pos = InlineTable::new();
         pos.insert("x", i64::from(b.x).into());
         pos.insert("y", i64::from(b.y).into());
+        pos.insert("scale", ((f64::from(b.scale) * 100.0).round() / 100.0).into());
+        pos.insert("opacity", ((f64::from(b.opacity) * 100.0).round() / 100.0).into());
+        pos.insert("timezone", b.timezone.as_str().into());
         if b.hidden {
             pos.insert("hidden", true.into());
         }
@@ -213,11 +280,10 @@ pub fn template() -> String {
 # saves its changes back into this file.
 enabled = {enabled}
 
-# Size multiplier, 0.5 to 3.0. 1.0 is sized for a 1080p screen and scales with
-# the resolution.
+# Default box size, 0.5 to 3.0; per-box sliders override this value.
 scale = {scale:.1}
 
-# Box background opacity, 0.15 to 1.0.
+# Default box background opacity, 0.15 to 1.0; per-box sliders override this.
 opacity = {opacity:.1}
 
 # Hide the boxes while no truck is active (main menu, profile selection).
@@ -227,6 +293,9 @@ hide_when_idle = {hide}
 # "Hide all": false hides every box in game but keeps which ones are checked
 # and where they are (the Hide all / Show all button in edit mode).
 visible = {visible}
+
+# Flash a red screen border when speed exceeds the active speed limit.
+exceed_speed_limit_indicator = {speed_alert}
 {boxes_comment}[overlay.boxes]
 {boxes}
 [udp]
@@ -246,6 +315,7 @@ hz = {hz}
         opacity = d.overlay.opacity,
         hide = d.overlay.hide_when_idle,
         visible = d.overlay.visible,
+        speed_alert = d.overlay.exceed_speed_limit_indicator,
         boxes_comment = boxes_comment(),
         udp_enabled = d.udp.enabled,
         targets = string_array(&d.udp.targets),
@@ -308,6 +378,25 @@ fn hidden_of(item: &Item) -> bool {
     v.unwrap_or(false)
 }
 
+fn number_of(item: &Item, key: &str) -> Option<f32> {
+    let value = if let Some(table) = item.as_inline_table() {
+        table.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
+    } else {
+        item.as_table()
+            .and_then(|table| table.get(key))
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
+    }? as f32;
+    value.is_finite().then_some(value)
+}
+
+fn string_of(item: &Item, key: &str) -> Option<String> {
+    if let Some(table) = item.as_inline_table() {
+        table.get(key).and_then(toml_edit::Value::as_str).map(str::to_owned)
+    } else {
+        item.as_table().and_then(|table| table.get(key)).and_then(Item::as_str).map(str::to_owned)
+    }
+}
+
 /// Parses settings text; invalid or missing values fall back to defaults
 /// with a warning.
 pub fn parse(text: &str, warnings: &mut Vec<String>) -> Settings {
@@ -344,6 +433,11 @@ pub fn parse(text: &str, warnings: &mut Vec<String>) -> Settings {
     read!("overlay", "opacity", as_f32, "a number", s.overlay.opacity);
     read!("overlay", "hide_when_idle", as_bool, "true or false", s.overlay.hide_when_idle);
     read!("overlay", "visible", as_bool, "true or false", s.overlay.visible);
+    read!("overlay", "exceed_speed_limit_indicator", as_bool, "true or false", s.overlay.exceed_speed_limit_indicator);
+    for b in &mut s.overlay.boxes {
+        b.scale = s.overlay.scale;
+        b.opacity = s.overlay.opacity;
+    }
     read!("udp", "enabled", as_bool, "true or false", s.udp.enabled);
     read!("udp", "targets", as_strings, "a list of \"host:port\" strings", s.udp.targets);
     read!("udp", "hz", as_u32, "a whole number", s.udp.hz);
@@ -365,7 +459,15 @@ pub fn parse(text: &str, warnings: &mut Vec<String>) -> Settings {
                         continue;
                     }
                     match xy(item) {
-                        Some((x, y)) => list.push(BoxPos { id: id.to_owned(), x, y, hidden: hidden_of(item) }),
+                        Some((x, y)) => list.push(BoxPos {
+                            id: id.to_owned(),
+                            x,
+                            y,
+                            hidden: hidden_of(item),
+                            scale: number_of(item, "scale").unwrap_or(s.overlay.scale),
+                            opacity: number_of(item, "opacity").unwrap_or(s.overlay.opacity),
+                            timezone: string_of(item, "timezone").unwrap_or_else(|| "UTC".into()),
+                        }),
                         None => warnings.push(format!("{FILE_NAME}: overlay.boxes.{id} must be {{ x = …, y = … }}; ignored")),
                     }
                 }
@@ -381,6 +483,9 @@ pub fn parse(text: &str, warnings: &mut Vec<String>) -> Settings {
         }
         let ids: Vec<String> = ids.into_iter().filter(|id| items::index_of(id).is_some()).collect();
         s.overlay.boxes = stacked(&ids, x, y, s.overlay.scale.clamp(0.5, 3.0));
+        for b in &mut s.overlay.boxes {
+            b.opacity = s.overlay.opacity;
+        }
     }
     s.overlay.sanitize();
     s
@@ -407,6 +512,7 @@ pub fn save_overlay(path: &Path, o: &OverlaySettings) -> io::Result<()> {
     t["opacity"] = value((f64::from(o.opacity) * 100.0).round() / 100.0);
     t["hide_when_idle"] = value(o.hide_when_idle);
     t["visible"] = value(o.visible);
+    t["exceed_speed_limit_indicator"] = value(o.exceed_speed_limit_indicator);
     for old in ["x", "y", "items"] {
         t.remove(old);
     }
@@ -481,9 +587,18 @@ mod tests {
         let edited = std::fs::read_to_string(&path).unwrap().replace("hz = 30", "hz = 60  # mine");
         std::fs::write(&path, edited).unwrap();
 
-        let mut o = OverlaySettings { enabled: true, scale: 1.25, editor: Some((700, 300)), ..OverlaySettings::default() };
+        let mut o = OverlaySettings {
+            enabled: true,
+            scale: 1.25,
+            editor: Some((700, 300)),
+            exceed_speed_limit_indicator: true,
+            ..OverlaySettings::default()
+        };
         o.toggle("throttle", (900, 500));
         o.set_position("speed", 123, 7);
+        o.set_box_scale("speed", 1.7);
+        o.set_box_opacity("speed", 0.4);
+        o.set_box_timezone("speed", "America/New_York");
         save_overlay(&path, &o).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -497,8 +612,10 @@ mod tests {
         assert_eq!(s.overlay.position("speed"), Some((123, 7)));
         assert_eq!(s.overlay.position("throttle"), Some((900, 500)));
         assert_eq!(s.overlay.editor, Some((700, 300)));
+        assert!(s.overlay.exceed_speed_limit_indicator);
         assert_eq!(s.udp.hz, 60);
         assert_eq!(s.overlay.boxes, o.boxes);
+        assert_eq!(s.overlay.boxes[0].timezone, "America/New_York");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -515,7 +632,10 @@ mod tests {
         save_overlay(&path, &o).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("gear = { x = 777, y = 555, hidden = true }"), "{text}");
+        assert!(
+            text.contains("gear = { x = 777, y = 555, scale = 1.0, opacity = 0.8, timezone = \"UTC\", hidden = true }"),
+            "{text}"
+        );
         assert!(text.contains("visible = false"));
         let mut w = Vec::new();
         let mut back = parse(&text, &mut w).overlay;
@@ -531,13 +651,14 @@ mod tests {
     fn v03_single_panel_file_is_converted() {
         let path = tmp("migrate");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let old = "[overlay]\n# keep me\nenabled = true\nx = 300\ny = 200\nscale = 1.0\nitems = [\"speed\", \"gear\", \"bogus\"]\n\n[udp]\nhz = 30\n";
+        let old = "[overlay]\n# keep me\nenabled = true\nx = 300\ny = 200\nscale = 1.0\nopacity = 0.5\nitems = [\"speed\", \"gear\", \"bogus\"]\n\n[udp]\nhz = 30\n";
         std::fs::write(&path, old).unwrap();
         let mut w = Vec::new();
         let s = parse(old, &mut w);
         assert_eq!(w.len(), 1, "unknown item warned: {w:?}");
         assert_eq!(s.overlay.position("speed"), Some((300, 200)));
         assert_eq!(s.overlay.position("gear"), Some((300, 200 + STACK_STEP)));
+        assert_eq!(s.overlay.boxes[0].opacity, 0.5);
         save_overlay(&path, &s.overlay).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("items ="), "old keys removed:\n{text}");
@@ -558,7 +679,10 @@ mod tests {
         );
         assert!(s.overlay.enabled, "invalid value → the default (on)");
         assert_eq!(s.overlay.scale, 3.0);
-        assert_eq!(s.overlay.boxes, vec![BoxPos { id: "speed".into(), x: 1, y: 2, hidden: false }]);
+        assert_eq!(
+            s.overlay.boxes,
+            vec![BoxPos { id: "speed".into(), x: 1, y: 2, hidden: false, scale: 3.0, opacity: 0.8, timezone: "UTC".into() }]
+        );
         assert_eq!(s.udp.hz, 30);
         assert_eq!(w.len(), 4, "{w:?}");
 

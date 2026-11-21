@@ -23,6 +23,8 @@ default-members = ["."]
 
 [dependencies]
 fontdue = "0.9.5"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 # Typed, safe SCS SDK framework (AptS-1547/scs-sdk-crates). It owns the
 # scs_telemetry_init / scs_telemetry_shutdown exports, all raw FFI, and wraps
 # every foreign entry point in catch_unwind. Pinned exactly: pre-1.0 and its

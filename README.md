@@ -192,7 +192,8 @@ One JSON object per datagram (whitespace added here):
  "lights":{"parking":true,"low":true,"high":false,"beacon":false,"brake":false,"reverse":false,
            "aux_front":0,"aux_roof":0},
  "warn":{"air":false,"air_emerg":false,"oil":false,"water":false,"battery":false,"adblue":false},
- "nav":{"limit_kmh":80.0}}
+ "nav":{"limit_kmh":80.0,"distance_km":42.7,"eta_real_s":3600.0,"eta_at_ms":1763581200123},
+ "game_time_min":1470,"rest_stop_min":275}
 ```
 
 | Field | Notes |
@@ -200,6 +201,7 @@ One JSON object per datagram (whitespace added here):
 | `seq` | +1 per datagram. A gap means loss; a backwards step with the same `sid` means reordering. |
 | `sid` | Changes on every plugin load. Reset your `seq` tracking when it changes. |
 | `age_ms` | Time since the game thread last published. It rises during loading screens or stalls, so treat > ~1000 as stale. |
+| `ts` | Unix wall-clock timestamp in milliseconds; the overlay displays it as UTC. |
 | `alive` | `false` only in the final datagram, sent from `scs_telemetry_shutdown`. |
 | `paused` | SDK pause state: `true` in the main menu, the ESC menu and loading screens. The plugin starts paused. |
 | `truck` | `false` when no truck configuration is active (main menu or profile selection). All values are then safe defaults. |
@@ -207,6 +209,11 @@ One JSON object per datagram (whitespace added here):
 | `ind.*blinker_lamp` | Lamp actually lit, so it blinks. When hazards are on, both lamps blink. |
 | `cruise.on` | Derived from `truck.cruise_control` (m/s, `0` = disabled). `set_*` are `0` when off. |
 | `ind.retarder` | `0` = off … `retarder_steps` (from the truck configuration). |
+| `rest_stop_min` | Time until the next rest stop, in in-game minutes. This is a countdown value, not an indication that the truck is currently resting; `null` when unsupported (ETS2 before schema 1.09). |
+| `game_time_min` | Absolute in-game minutes since the first day; the overlay displays day and `HH:MM`. `null` when unsupported (ETS2 before schema 1.09). |
+| `nav.distance_km` | Remaining distance to the active navigation target, in km (typically the job destination); `null` when unsupported (ETS2 before schema 1.12). |
+| `nav.eta_real_s` | Estimated real seconds remaining, derived from the Route Advisor ETA divided by `local.scale`; scale defaults to 1 on 1:1 maps where the SDK omits it. |
+| `nav.eta_at_ms` | Estimated Unix arrival timestamp in milliseconds, null while paused or when no ETA is available. It targets the active navigation destination. |
 | `lights.aux_*` | `0` = off, `1` = dimmed, `2` = full. |
 | `null` values | The channel doesn't exist in the running game's telemetry schema (e.g. `hazard` before ETS2 schema 1.17, `adblue` in ATS). |
 

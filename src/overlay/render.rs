@@ -132,13 +132,23 @@ pub enum Button {
     Fainter,
     Stronger,
     IdleMode,
+    SpeedAlert,
     HideAll,
     Done,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SliderKind {
+    Scale,
+    Opacity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
     Toggle(usize),
+    Select(usize),
+    Slider(usize, SliderKind),
+    Timezone(i32),
     Button(Button),
 }
 
@@ -193,10 +203,12 @@ pub struct BoxModel<'a> {
 pub struct EditorModel<'a> {
     pub k: f32,
     pub hide_when_idle: bool,
+    pub exceed_speed_limit_indicator: bool,
     /// false = "Hide all" is on.
     pub visible: bool,
     /// Per `ITEMS` entry: is its box shown.
     pub shown: &'a [bool],
+    pub selected_item: Option<(usize, f32, f32, &'a str)>,
     pub status: &'a str,
     pub hover: Option<Hit>,
 }
@@ -285,6 +297,10 @@ impl Builder<'_> {
     }
 
     fn button(&mut self, x: f32, y: f32, label: &str, b: Button, primary: bool, hover: bool) -> f32 {
+        self.button_hit(x, y, label, primary, hover, Hit::Button(b))
+    }
+
+    fn button_hit(&mut self, x: f32, y: f32, label: &str, primary: bool, hover: bool, hit: Hit) -> f32 {
         let (k, px) = (self.k, 13.0 * self.k);
         let w = self.fonts.measure(label, px, true) + 20.0 * k;
         let h = 26.0 * k;
@@ -298,8 +314,36 @@ impl Builder<'_> {
         self.ops.push(Op::Fill { r, radius: 6.0 * k, rgba: bg });
         let fg = if primary { [10, 18, 30, 255] } else { TEXT };
         self.text(x + 10.0 * k, y, h, px, true, fg, label);
-        self.hits.push((r, Hit::Button(b)));
+        self.hits.push((r, hit));
         w
+    }
+
+    fn slider(&mut self, x: f32, y: f32, w: f32, label: &str, value: f32, min: f32, max: f32, display: String, hit: Hit) {
+        let k = self.k;
+        let h = 22.0 * k;
+        let label_w = 58.0 * k;
+        let value_w = 48.0 * k;
+        let track = Rect {
+            x: x + label_w,
+            y: y + 8.0 * k,
+            w: (w - label_w - value_w - 12.0 * k).max(24.0 * k),
+            h: 6.0 * k,
+        };
+        let frac = ((value - min) / (max - min)).clamp(0.0, 1.0);
+        self.text(x, y, h, 12.5 * k, false, DIM, label);
+        self.ops.push(Op::Fill { r: track, radius: track.h / 2.0, rgba: TRACK });
+        if frac > 0.0 {
+            let fill = Rect { w: track.w * frac, ..track };
+            self.ops.push(Op::Fill { r: fill, radius: track.h / 2.0, rgba: ACCENT });
+        }
+        let knob = 10.0 * k;
+        self.ops.push(Op::Fill {
+            r: Rect { x: track.x + track.w * frac - knob / 2.0, y: track.y - (knob - track.h) / 2.0, w: knob, h: knob },
+            radius: knob / 2.0,
+            rgba: ACCENT,
+        });
+        self.text(track.x + track.w + 8.0 * k, y, h, 12.5 * k, true, TEXT, display);
+        self.hits.push((track, hit));
     }
 }
 
@@ -344,7 +388,7 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
 
     let title_px = 17.0 * k;
     let small = 12.5 * k;
-    let hint1 = "Drag any box to move it · click an item below to show or hide its box (it keeps its place)";
+    let hint1 = "Click a card to adjust it · use its checkbox to show or hide · drag a box to move it";
     let hint2 = format!("Ctrl+Shift+Backspace or Done to finish · drag this panel by its title · {}", m.status);
     let mut y = pad;
     b.text(pad, y, 22.0 * k, title_px, true, ACCENT, "Telemetry overlay · edit mode");
@@ -368,12 +412,22 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
     // Hide all / Show all: highlighted while everything is hidden
     let (all_label, all_primary) = if m.visible { ("Hide all", false) } else { ("Show all", true) };
     x += b.button(x, y, all_label, Button::HideAll, all_primary, m.hover == Some(Hit::Button(Button::HideAll))) + 6.0 * k;
+    let speed_alert_label = if m.exceed_speed_limit_indicator { "Exceed speed limit: on" } else { "Exceed speed limit: off" };
+    x += b.button(
+        x,
+        y,
+        speed_alert_label,
+        Button::SpeedAlert,
+        m.exceed_speed_limit_indicator,
+        m.hover == Some(Hit::Button(Button::SpeedAlert)),
+    ) + 6.0 * k;
     let done_w = fonts.measure("Done", 13.0 * k, true) + 20.0 * k;
     let w = [
         pad * 2.0 + col_w * cols as f32,
         x + done_w + pad,
         pad * 2.0 + fonts.measure(hint1, small, false),
         pad * 2.0 + fonts.measure(&hint2, small, false),
+        if m.selected_item.is_some() { pad * 2.0 + 560.0 * k } else { 0.0 },
     ]
     .into_iter()
     .fold(0.0, f32::max);
@@ -387,7 +441,13 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
         let y0 = grid_top + row as f32 * row_h;
         let on = m.shown.get(i).copied().unwrap_or(false);
         let r = Rect { x: x0 - 4.0 * k, y: y0, w: col_w - 4.0 * k, h: row_h };
-        if m.hover == Some(Hit::Toggle(i)) {
+        if m.selected_item.is_some_and(|(selected, _, _, _)| selected == i) {
+            b.ops.push(Op::Fill { r, radius: 5.0 * k, rgba: [78, 161, 255, 24] });
+            if m.hover == Some(Hit::Toggle(i)) || m.hover == Some(Hit::Select(i)) {
+                b.ops.push(Op::Fill { r, radius: 5.0 * k, rgba: HOVER });
+            }
+            b.ops.push(Op::Outline { r, radius: 5.0 * k, width: 1.0 * k, rgba: ACCENT });
+        } else if m.hover == Some(Hit::Toggle(i)) || m.hover == Some(Hit::Select(i)) {
             b.ops.push(Op::Fill { r, radius: 5.0 * k, rgba: HOVER });
         }
         let cb = Rect { x: x0, y: y0 + (row_h - check) / 2.0, w: check, h: check };
@@ -406,9 +466,70 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
             b.ops.push(Op::Outline { r: cb, radius: 4.0 * k, width: 1.5 * k, rgba: DIM });
         }
         b.text(x0 + check + 8.0 * k, y0, row_h, px, false, if on { TEXT } else { DIM }, item.label);
-        b.hits.push((r, Hit::Toggle(i)));
+        b.hits.push((cb, Hit::Toggle(i)));
+        let select = Rect { x: cb.x + cb.w + 4.0 * k, y: y0, w: r.w - cb.w - 8.0 * k, h: row_h };
+        b.hits.push((select, Hit::Select(i)));
     }
-    let h = grid_top + per_col as f32 * row_h + pad;
+    let mut h = grid_top + per_col as f32 * row_h + pad;
+    if let Some((index, scale, opacity, timezone)) = m.selected_item {
+        let section_y = h;
+        let section_w = w - pad * 2.0;
+        let has_timezone = ITEMS[index].id == "real_time";
+        let section_h = if has_timezone { 108.0 * k } else { 78.0 * k };
+        b.ops.push(Op::Fill {
+            r: Rect { x: pad, y: section_y, w: section_w, h: section_h },
+            radius: 6.0 * k,
+            rgba: [255, 255, 255, 12],
+        });
+        b.text(pad + 8.0 * k, section_y + 3.0 * k, 18.0 * k, small, true, ACCENT, format!("{} box", ITEMS[index].label));
+        b.slider(
+            pad + 8.0 * k,
+            section_y + 24.0 * k,
+            section_w - 16.0 * k,
+            "Size",
+            scale,
+            0.5,
+            3.0,
+            format!("{scale:.2}×"),
+            Hit::Slider(index, SliderKind::Scale),
+        );
+        b.slider(
+            pad + 8.0 * k,
+            section_y + 49.0 * k,
+            section_w - 16.0 * k,
+            "Opacity",
+            opacity,
+            0.15,
+            1.0,
+            format!("{:.0}%", opacity * 100.0),
+            Hit::Slider(index, SliderKind::Opacity),
+        );
+        if has_timezone {
+            let row_y = section_y + 77.0 * k;
+            b.text(pad + 8.0 * k, row_y, 24.0 * k, small, false, DIM, "Timezone");
+            let prev_x = pad + 88.0 * k;
+            let prev_w = b.button_hit(
+                prev_x,
+                row_y,
+                "<",
+                false,
+                m.hover == Some(Hit::Timezone(-1)),
+                Hit::Timezone(-1),
+            );
+            let zone_x = prev_x + prev_w + 8.0 * k;
+            b.text(zone_x, row_y, 24.0 * k, small, true, TEXT, timezone);
+            let next_x = zone_x + fonts.measure(timezone, small, true) + 10.0 * k;
+            b.button_hit(
+                next_x,
+                row_y,
+                ">",
+                false,
+                m.hover == Some(Hit::Timezone(1)),
+                Hit::Timezone(1),
+            );
+        }
+        h = section_y + section_h + pad;
+    }
 
     let mut ops = vec![
         Op::Fill { r: Rect { x: 0.0, y: 0.0, w, h }, radius: 10.0 * k, rgba: [14, 17, 23, 242] },
@@ -416,6 +537,21 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
     ];
     ops.append(&mut b.ops);
     Scene { w: w.ceil() as u32, h: h.ceil() as u32, hits: b.hits, value_w: 0.0, fade: 1.0, ops }
+}
+
+pub fn build_alert_strip(w: u32, h: u32, alpha: u8) -> Scene {
+    Scene {
+        w,
+        h,
+        hits: Vec::new(),
+        value_w: 0.0,
+        fade: 1.0,
+        ops: vec![Op::Fill {
+            r: Rect { x: 0.0, y: 0.0, w: w as f32, h: h as f32 },
+            radius: 0.0,
+            rgba: [255, 0, 0, alpha],
+        }],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -564,12 +700,31 @@ mod tests {
     fn editor_hits_cover_every_item_and_button() {
         let fonts = Fonts::embedded().unwrap();
         let shown: Vec<bool> = ITEMS.iter().map(|i| i.default_on).collect();
-        let m = EditorModel { k: 1.0, hide_when_idle: true, visible: true, shown: &shown, status: "ETS2 1.22", hover: None };
+        let m = EditorModel {
+            k: 1.0,
+            hide_when_idle: true,
+            exceed_speed_limit_indicator: false,
+            visible: true,
+            shown: &shown,
+            selected_item: Some((0, 1.0, 0.8, "UTC")),
+            status: "ETS2 1.22",
+            hover: None,
+        };
         let s = build_editor(&m, &fonts);
         for i in 0..ITEMS.len() {
             assert!(s.hits.iter().any(|(_, h)| *h == Hit::Toggle(i)), "item {i} not clickable");
+            assert!(s.hits.iter().any(|(_, h)| *h == Hit::Select(i)), "item {i} not selectable");
         }
-        for b in [Button::Smaller, Button::Bigger, Button::Fainter, Button::Stronger, Button::IdleMode, Button::HideAll, Button::Done] {
+        for hit in [Hit::Slider(0, SliderKind::Scale), Hit::Slider(0, SliderKind::Opacity)] {
+            assert!(s.hits.iter().any(|(_, h)| *h == hit), "{hit:?} missing");
+        }
+        let real_time = build_editor(
+            &EditorModel { selected_item: Some((index_of("real_time").unwrap(), 1.0, 0.8, "America/New_York")), ..m },
+            &fonts,
+        );
+        assert!(real_time.hits.iter().any(|(_, h)| *h == Hit::Timezone(-1)));
+        assert!(real_time.hits.iter().any(|(_, h)| *h == Hit::Timezone(1)));
+        for b in [Button::Smaller, Button::Bigger, Button::Fainter, Button::Stronger, Button::IdleMode, Button::SpeedAlert, Button::HideAll, Button::Done] {
             let (r, _) = s.hits.iter().find(|(_, h)| *h == Hit::Button(b)).unwrap();
             assert!(r.x + r.w <= s.w as f32 && r.y + r.h <= s.h as f32, "{b:?} outside panel");
             assert_eq!(s.hit(r.x + 1.0, r.y + 1.0), Some(Hit::Button(b)));
@@ -577,6 +732,12 @@ mod tests {
         assert_eq!(s.hit(5.0, 5.0), None, "title area = drag handle");
         let hovered = build_editor(&EditorModel { hover: Some(Hit::Toggle(0)), ..m }, &fonts);
         assert_ne!(s, hovered);
+        let border = build_alert_strip(320, 8, 191);
+        let mut paint_fonts = Fonts::embedded().unwrap();
+        let pixmap = paint(&border, &mut paint_fonts, 1.0, border.w, border.h).unwrap();
+        let red = pixmap.pixel(0, 0).unwrap();
+        assert_eq!(red.red(), 191);
+        assert_eq!(red.alpha(), 191);
     }
 
     #[test]
@@ -599,7 +760,16 @@ mod tests {
             paint(&s, &mut fonts, 1.0, s.w, s.h).unwrap().save_png(dir.join(format!("{name}.png"))).unwrap();
         }
         let shown: Vec<bool> = ITEMS.iter().map(|i| i.default_on).collect();
-        let m = EditorModel { k: 1.0, hide_when_idle: true, visible: true, shown: &shown, status: "ETS2 1.22", hover: Some(Hit::Toggle(4)) };
+        let m = EditorModel {
+            k: 1.0,
+            hide_when_idle: true,
+            exceed_speed_limit_indicator: false,
+            visible: true,
+            shown: &shown,
+            selected_item: Some((0, 1.0, 0.8, "UTC")),
+            status: "ETS2 1.22",
+            hover: Some(Hit::Toggle(4)),
+        };
         let s = build_editor(&m, &fonts);
         paint(&s, &mut fonts, 1.0, s.w, s.h).unwrap().save_png(dir.join("editor.png")).unwrap();
     }
