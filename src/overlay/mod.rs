@@ -452,6 +452,15 @@ impl Core {
                     }
                 }
             }
+            Some(Target::Editor(Some(Hit::LabelToggle(i)))) => {
+                let id = ITEMS[i].id.to_owned();
+                let at = self.new_box_position(p.1);
+                self.cfg.ensure_box(&id, at);
+                self.cfg.toggle_box_label(&id);
+                self.floors.remove(&id);
+                self.selected_item = Some(id);
+                self.save();
+            }
             Some(Target::Editor(Some(Hit::Button(b)))) => self.on_button(b),
             Some(Target::Editor(None)) => {
                 if let Some(a) = self.area_of(&Target::Editor(None)) {
@@ -524,6 +533,7 @@ impl Core {
                         k: b.scale * ui_k,
                         opacity: b.opacity,
                         label: item.label,
+                        show_label: b.show_label,
                         show,
                         edit,
                         hover: self.hover.as_ref() == Some(&target) || matches!(&self.drag, Some(Drag::Box { id, .. }) if *id == b.id),
@@ -554,7 +564,7 @@ impl Core {
             let selected_item = self.selected_item.as_ref().and_then(|id| {
                 let index = items::index_of(id)?;
                 let b = self.cfg.boxes.iter().find(|b| b.id == *id)?;
-                Some((index, b.scale, b.opacity, b.timezone.as_str()))
+                Some((index, b.scale, b.opacity, b.timezone.as_str(), b.show_label))
             });
             let game = self.data.as_ref().and_then(|d| d.get("game")).and_then(Value::as_str).unwrap_or("game");
             let ver = self.data.as_ref().and_then(|d| d.get("game_ver")).and_then(Value::as_str).unwrap_or("?");
@@ -800,8 +810,8 @@ mod tests {
     fn one_box_per_item_at_its_position_and_only_changed_boxes_repaint() {
         let cfg = OverlaySettings {
             boxes: vec![
-                BoxPos { id: "speed".into(), x: 100, y: 50, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into() },
-                BoxPos { id: "gear".into(), x: 1500, y: 900, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into() },
+                BoxPos { id: "speed".into(), x: 100, y: 50, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into(), show_label: true },
+                BoxPos { id: "gear".into(), x: 1500, y: 900, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into(), show_label: true },
             ],
             ..enabled()
         };
@@ -832,7 +842,7 @@ mod tests {
     #[test]
     fn boxes_stay_on_screen() {
         let cfg = OverlaySettings {
-            boxes: vec![BoxPos { id: "speed".into(), x: 5000, y: 5000, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into() }],
+            boxes: vec![BoxPos { id: "speed".into(), x: 5000, y: 5000, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into(), show_label: true }],
             ..enabled()
         };
         let mut c = core(cfg, None);
@@ -845,8 +855,8 @@ mod tests {
     fn card_sliders_only_change_the_selected_box() {
         let cfg = OverlaySettings {
             boxes: vec![
-                BoxPos { id: "speed".into(), x: 40, y: 40, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into() },
-                BoxPos { id: "gear".into(), x: 40, y: 80, hidden: false, scale: 0.9, opacity: 0.5, timezone: "UTC".into() },
+                BoxPos { id: "speed".into(), x: 40, y: 40, hidden: false, scale: 1.0, opacity: 0.8, timezone: "UTC".into(), show_label: true },
+                BoxPos { id: "gear".into(), x: 40, y: 80, hidden: false, scale: 0.9, opacity: 0.5, timezone: "UTC".into(), show_label: true },
             ],
             ..enabled()
         };
@@ -871,6 +881,27 @@ mod tests {
         c.frame(BB, at(pointer.0, pointer.1, true));
         c.frame(BB, at(pointer.0, pointer.1, false));
         assert_eq!(c.selected_item.as_deref(), Some("speed"));
+
+        let editor_area = c.area_of(&Target::Editor(None)).unwrap();
+        let label_toggle = c
+            .editor
+            .as_ref()
+            .unwrap()
+            .scene
+            .hits
+            .iter()
+            .find(|(_, hit)| *hit == Hit::LabelToggle(items::index_of("speed").unwrap()))
+            .unwrap()
+            .0;
+        let label_pointer = (
+            editor_area.x + label_toggle.x + label_toggle.w / 2.0,
+            editor_area.y + label_toggle.y + label_toggle.h / 2.0,
+        );
+        c.frame(BB, at(label_pointer.0, label_pointer.1, false));
+        c.frame(BB, at(label_pointer.0, label_pointer.1, true));
+        c.frame(BB, at(label_pointer.0, label_pointer.1, false));
+        assert!(!c.cfg.boxes.iter().find(|b| b.id == "speed").unwrap().show_label);
+        assert!(c.cfg.boxes.iter().find(|b| b.id == "gear").unwrap().show_label);
 
         for kind in [SliderKind::Scale, SliderKind::Opacity] {
             let editor_area = c.area_of(&Target::Editor(None)).unwrap();
@@ -911,6 +942,7 @@ mod tests {
                 scale: 1.0,
                 opacity: 0.8,
                 timezone: "UTC".into(),
+                show_label: true,
             }],
             ..enabled()
         };

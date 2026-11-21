@@ -37,6 +37,7 @@ pub struct BoxPos {
     pub scale: f32,
     pub opacity: f32,
     pub timezone: String,
+    pub show_label: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +71,7 @@ pub fn stacked(ids: &[String], x: i32, y: i32, scale: f32) -> Vec<BoxPos> {
             scale,
             opacity: 0.8,
             timezone: "UTC".into(),
+            show_label: true,
         })
         .collect()
 }
@@ -143,6 +145,7 @@ impl OverlaySettings {
             scale: self.scale,
             opacity: self.opacity,
             timezone: "UTC".into(),
+            show_label: true,
         });
         self.sanitize();
     }
@@ -169,6 +172,12 @@ impl OverlaySettings {
         }
     }
 
+    pub fn toggle_box_label(&mut self, id: &str) {
+        if let Some(b) = self.boxes.iter_mut().find(|b| b.id == id) {
+            b.show_label = !b.show_label;
+        }
+    }
+
     /// Hides a shown item, or shows it again: where it was before, or at
     /// `at` the first time.
     pub fn toggle(&mut self, id: &str, at: (i32, i32)) {
@@ -183,6 +192,7 @@ impl OverlaySettings {
                     scale: self.scale,
                     opacity: self.opacity,
                     timezone: "UTC".into(),
+                    show_label: true,
                 });
                 self.sanitize();
             }
@@ -226,7 +236,7 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 const BOXES_COMMENT: &str = "\
-# One box per telemetry item: `id = { x = …, y = …, scale = …, opacity = …, timezone = … }`.
+# One box per telemetry item: `id = { x = …, y = …, scale = …, opacity = …, timezone = …, show_label = false }`.
 # In edit mode, select a card to adjust only that box. `hidden = true` hides it
 # but keeps its position and style. The Real time card's timezone can be cycled
 # through common IANA zones in edit mode. Easier: use edit mode in game. Items:
@@ -252,6 +262,9 @@ fn boxes_table(boxes: &[BoxPos]) -> Table {
         pos.insert("timezone", b.timezone.as_str().into());
         if b.hidden {
             pos.insert("hidden", true.into());
+        }
+        if !b.show_label {
+            pos.insert("show_label", false.into());
         }
         t.insert(&b.id, value(pos));
     }
@@ -397,6 +410,14 @@ fn string_of(item: &Item, key: &str) -> Option<String> {
     }
 }
 
+fn bool_of(item: &Item, key: &str) -> Option<bool> {
+    if let Some(table) = item.as_inline_table() {
+        table.get(key).and_then(toml_edit::Value::as_bool)
+    } else {
+        item.as_table().and_then(|table| table.get(key)).and_then(Item::as_bool)
+    }
+}
+
 /// Parses settings text; invalid or missing values fall back to defaults
 /// with a warning.
 pub fn parse(text: &str, warnings: &mut Vec<String>) -> Settings {
@@ -467,6 +488,7 @@ pub fn parse(text: &str, warnings: &mut Vec<String>) -> Settings {
                             scale: number_of(item, "scale").unwrap_or(s.overlay.scale),
                             opacity: number_of(item, "opacity").unwrap_or(s.overlay.opacity),
                             timezone: string_of(item, "timezone").unwrap_or_else(|| "UTC".into()),
+                            show_label: bool_of(item, "show_label").unwrap_or(true),
                         }),
                         None => warnings.push(format!("{FILE_NAME}: overlay.boxes.{id} must be {{ x = …, y = … }}; ignored")),
                     }
@@ -599,6 +621,7 @@ mod tests {
         o.set_box_scale("speed", 1.7);
         o.set_box_opacity("speed", 0.4);
         o.set_box_timezone("speed", "America/New_York");
+        o.toggle_box_label("speed");
         save_overlay(&path, &o).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -616,6 +639,7 @@ mod tests {
         assert_eq!(s.udp.hz, 60);
         assert_eq!(s.overlay.boxes, o.boxes);
         assert_eq!(s.overlay.boxes[0].timezone, "America/New_York");
+        assert!(!s.overlay.boxes[0].show_label);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -681,7 +705,16 @@ mod tests {
         assert_eq!(s.overlay.scale, 3.0);
         assert_eq!(
             s.overlay.boxes,
-            vec![BoxPos { id: "speed".into(), x: 1, y: 2, hidden: false, scale: 3.0, opacity: 0.8, timezone: "UTC".into() }]
+            vec![BoxPos {
+                id: "speed".into(),
+                x: 1,
+                y: 2,
+                hidden: false,
+                scale: 3.0,
+                opacity: 0.8,
+                timezone: "UTC".into(),
+                show_label: true,
+            }]
         );
         assert_eq!(s.udp.hz, 30);
         assert_eq!(w.len(), 4, "{w:?}");

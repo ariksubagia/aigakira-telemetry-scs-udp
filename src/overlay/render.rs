@@ -148,6 +148,7 @@ pub enum Hit {
     Toggle(usize),
     Select(usize),
     Slider(usize, SliderKind),
+    LabelToggle(usize),
     Timezone(i32),
     Button(Button),
 }
@@ -189,6 +190,7 @@ pub struct BoxModel<'a> {
     pub k: f32,
     pub opacity: f32,
     pub label: &'a str,
+    pub show_label: bool,
     pub show: Show,
     /// Edit mode: outlined, and highlighted when `hover`.
     pub edit: bool,
@@ -208,7 +210,7 @@ pub struct EditorModel<'a> {
     pub visible: bool,
     /// Per `ITEMS` entry: is its box shown.
     pub shown: &'a [bool],
-    pub selected_item: Option<(usize, f32, f32, &'a str)>,
+    pub selected_item: Option<(usize, f32, f32, &'a str, bool)>,
     pub status: &'a str,
     pub hover: Option<Hit>,
 }
@@ -355,9 +357,10 @@ pub fn build_box(m: &BoxModel<'_>, fonts: &Fonts) -> Scene {
     let (k, px, row_h) = (b.k, b.px(), b.row_h());
     let (pad_x, gap) = (10.0 * k, 12.0 * k);
     let h = BOX_H * k;
-    let label_w = fonts.measure(m.label, px, false);
+    let label_w = if m.show_label { fonts.measure(m.label, px, false) } else { 0.0 };
     let value_w = b.value_width(&m.show).max(m.value_floor).max(24.0 * k);
-    let w = pad_x * 2.0 + label_w + gap + value_w;
+    let label_gap = if m.show_label { gap } else { 0.0 };
+    let w = pad_x * 2.0 + label_w + label_gap + value_w;
     // The real opacity also in edit mode, so changes are visible right away.
     let alpha = (m.opacity * 255.0).round() as u8;
     let all = Rect { x: 0.0, y: 0.0, w, h };
@@ -369,8 +372,10 @@ pub fn build_box(m: &BoxModel<'_>, fonts: &Fonts) -> Scene {
         b.ops.push(Op::Outline { r, radius: 8.0 * k, width, rgba });
     }
     let y = (h - row_h) / 2.0;
-    b.text(pad_x, y, row_h, px, false, DIM, m.label);
-    b.value(pad_x + label_w + gap, y, &m.show);
+    if m.show_label {
+        b.text(pad_x, y, row_h, px, false, DIM, m.label);
+    }
+    b.value(pad_x + label_w + label_gap, y, &m.show);
     let fade = if m.ghost { 0.4 } else { 1.0 };
     Scene { w: w.ceil() as u32, h: h.ceil() as u32, hits: Vec::new(), value_w, fade, ops: b.ops }
 }
@@ -441,7 +446,7 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
         let y0 = grid_top + row as f32 * row_h;
         let on = m.shown.get(i).copied().unwrap_or(false);
         let r = Rect { x: x0 - 4.0 * k, y: y0, w: col_w - 4.0 * k, h: row_h };
-        if m.selected_item.is_some_and(|(selected, _, _, _)| selected == i) {
+        if m.selected_item.is_some_and(|(selected, _, _, _, _)| selected == i) {
             b.ops.push(Op::Fill { r, radius: 5.0 * k, rgba: [78, 161, 255, 24] });
             if m.hover == Some(Hit::Toggle(i)) || m.hover == Some(Hit::Select(i)) {
                 b.ops.push(Op::Fill { r, radius: 5.0 * k, rgba: HOVER });
@@ -471,11 +476,11 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
         b.hits.push((select, Hit::Select(i)));
     }
     let mut h = grid_top + per_col as f32 * row_h + pad;
-    if let Some((index, scale, opacity, timezone)) = m.selected_item {
+    if let Some((index, scale, opacity, timezone, show_label)) = m.selected_item {
         let section_y = h;
         let section_w = w - pad * 2.0;
         let has_timezone = ITEMS[index].id == "real_time";
-        let section_h = if has_timezone { 108.0 * k } else { 78.0 * k };
+        let section_h = if has_timezone { 136.0 * k } else { 106.0 * k };
         b.ops.push(Op::Fill {
             r: Rect { x: pad, y: section_y, w: section_w, h: section_h },
             radius: 6.0 * k,
@@ -504,8 +509,37 @@ pub fn build_editor(m: &EditorModel<'_>, fonts: &Fonts) -> Scene {
             format!("{:.0}%", opacity * 100.0),
             Hit::Slider(index, SliderKind::Opacity),
         );
+        let label_row_y = section_y + 75.0 * k;
+        let label_row = Rect { x: pad + 4.0 * k, y: label_row_y, w: 130.0 * k, h: 24.0 * k };
+        if m.hover == Some(Hit::LabelToggle(index)) {
+            b.ops.push(Op::Fill { r: label_row, radius: 4.0 * k, rgba: HOVER });
+        }
+        let label_check = Rect { x: pad + 8.0 * k, y: label_row_y + 4.0 * k, w: 15.0 * k, h: 15.0 * k };
+        if show_label {
+            b.ops.push(Op::Fill { r: label_check, radius: 3.0 * k, rgba: ACCENT });
+            b.ops.push(Op::Triangle {
+                pts: [
+                    (label_check.x + 0.22 * label_check.w, label_check.y + 0.52 * label_check.h),
+                    (label_check.x + 0.43 * label_check.w, label_check.y + 0.74 * label_check.h),
+                    (label_check.x + 0.43 * label_check.w, label_check.y + 0.56 * label_check.h),
+                ],
+                rgba: [10, 18, 30, 255],
+            });
+            b.ops.push(Op::Triangle {
+                pts: [
+                    (label_check.x + 0.43 * label_check.w, label_check.y + 0.74 * label_check.h),
+                    (label_check.x + 0.80 * label_check.w, label_check.y + 0.28 * label_check.h),
+                    (label_check.x + 0.41 * label_check.w, label_check.y + 0.56 * label_check.h),
+                ],
+                rgba: [10, 18, 30, 255],
+            });
+        } else {
+            b.ops.push(Op::Outline { r: label_check, radius: 3.0 * k, width: 1.5 * k, rgba: DIM });
+        }
+        b.text(pad + 31.0 * k, label_row_y, 22.0 * k, small, false, if show_label { TEXT } else { DIM }, "Show label");
+        b.hits.push((label_row, Hit::LabelToggle(index)));
         if has_timezone {
-            let row_y = section_y + 77.0 * k;
+            let row_y = section_y + 103.0 * k;
             b.text(pad + 8.0 * k, row_y, 24.0 * k, small, false, DIM, "Timezone");
             let prev_x = pad + 88.0 * k;
             let prev_w = b.button_hit(
@@ -663,7 +697,17 @@ mod tests {
 
     fn boxm(id: &str, edit: bool, hover: bool, k: f32) -> BoxModel<'static> {
         let item = &ITEMS[index_of(id).unwrap()];
-        BoxModel { k, opacity: 0.8, label: item.label, show: (item.show)(&sample()), edit, hover, ghost: false, value_floor: 0.0 }
+        BoxModel {
+            k,
+            opacity: 0.8,
+            label: item.label,
+            show_label: true,
+            show: (item.show)(&sample()),
+            edit,
+            hover,
+            ghost: false,
+            value_floor: 0.0,
+        }
     }
 
     fn texts(s: &Scene) -> Vec<&str> {
@@ -675,6 +719,9 @@ mod tests {
         let fonts = Fonts::embedded().unwrap();
         let s = build_box(&boxm("speed", false, false, 1.0), &fonts);
         assert_eq!(texts(&s), vec!["Speed", "87 km/h"]);
+        let no_label = build_box(&BoxModel { show_label: false, ..boxm("speed", false, false, 1.0) }, &fonts);
+        assert_eq!(texts(&no_label), vec!["87 km/h"]);
+        assert!(no_label.w < s.w, "hiding the label reclaims its width");
         assert!(s.hits.is_empty());
         assert_eq!(s.h as f32, BOX_H);
         let big = build_box(&boxm("speed", false, false, 2.0), &fonts);
@@ -706,7 +753,7 @@ mod tests {
             exceed_speed_limit_indicator: false,
             visible: true,
             shown: &shown,
-            selected_item: Some((0, 1.0, 0.8, "UTC")),
+            selected_item: Some((0, 1.0, 0.8, "UTC", true)),
             status: "ETS2 1.22",
             hover: None,
         };
@@ -718,8 +765,9 @@ mod tests {
         for hit in [Hit::Slider(0, SliderKind::Scale), Hit::Slider(0, SliderKind::Opacity)] {
             assert!(s.hits.iter().any(|(_, h)| *h == hit), "{hit:?} missing");
         }
+        assert!(s.hits.iter().any(|(_, h)| *h == Hit::LabelToggle(0)));
         let real_time = build_editor(
-            &EditorModel { selected_item: Some((index_of("real_time").unwrap(), 1.0, 0.8, "America/New_York")), ..m },
+            &EditorModel { selected_item: Some((index_of("real_time").unwrap(), 1.0, 0.8, "America/New_York", true)), ..m },
             &fonts,
         );
         assert!(real_time.hits.iter().any(|(_, h)| *h == Hit::Timezone(-1)));
@@ -766,7 +814,7 @@ mod tests {
             exceed_speed_limit_indicator: false,
             visible: true,
             shown: &shown,
-            selected_item: Some((0, 1.0, 0.8, "UTC")),
+            selected_item: Some((0, 1.0, 0.8, "UTC", true)),
             status: "ETS2 1.22",
             hover: Some(Hit::Toggle(4)),
         };
